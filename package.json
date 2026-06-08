@@ -1,11 +1,8 @@
 {
   "name": "afterglow-register-frontend",
-  "version": "2.0.2",
+  "version": "2.0.3",
   "private": true,
   "type": "module",
-  "engines": {
-    "node": "20.x"
-  },
   "scripts": {
     "dev": "vite --host 0.0.0.0 --port 5180",
     "build": "node ./node_modules/vite/bin/vite.js build",
@@ -21,5 +18,8 @@
     "html5-qrcode": "latest",
     "react-easy-crop": "latest"
   },
-  "devDependencies": {}
+  "devDependencies": {},
+  "engines": {
+    "node": "20.x"
+  }
 }

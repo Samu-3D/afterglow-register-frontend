@@ -40,12 +40,72 @@ const DEFAULT_BADGE = {
   photoX: 50,
   photoY: 19,
   photoSize: 21,
+  photoShape: "circle",
+  photoBorderColor: "#ffffff",
+  photoBorderWidth: 2,
+  photoFit: "cover",
+  showPhotoPlaceholder: true,
+  showEventTitle: true,
+  eventTitleX: 50,
+  eventTitleY: 5,
+  eventTitleSize: 9,
+  eventTitleColor: "#E8B267",
+  eventTitleWeight: "bold",
+  eventTitleUppercase: true,
+  showQR: true,
+  qrBackground: true,
+  qrPadding: 5,
+  qrRadius: 6,
+  backgroundFit: "cover",
 };
 const DEFAULT_PRINT = { paperSize: "A6", customWidthMm: 105, customHeightMm: 148, marginMm: 0, fitToPaper: true, autoPrintAfterCheckin: true };
 
 const fmtDate = (d) => (d ? new Date(d).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" }) : "—");
 const fmtTime = (d) => (d ? new Date(d).toLocaleString("en-GB", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }) : "—");
 const safe = (v) => (v === undefined || v === null || v === "" ? "—" : String(v));
+const formatBytes = (bytes = 0) => {
+  if (!bytes) return "0 KB";
+  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+};
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+function loadBrowserImage(src) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = reject;
+    img.src = src;
+  });
+}
+async function imageFileToDataUrl(file, { maxWidth = 1600, maxHeight = 1200, quality = 0.88 } = {}) {
+  const original = await readFileAsDataUrl(file);
+  if (!file.type.startsWith("image/")) return original;
+  if (file.size <= 900 * 1024) return original;
+  const img = await loadBrowserImage(original);
+  const scale = Math.min(1, maxWidth / img.width, maxHeight / img.height);
+  const width = Math.max(1, Math.round(img.width * scale));
+  const height = Math.max(1, Math.round(img.height * scale));
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  ctx.drawImage(img, 0, 0, width, height);
+  return canvas.toDataURL("image/jpeg", quality);
+}
+async function fileToStoredAsset(file, kind = "file") {
+  if (!file) return null;
+  if (kind === "document" && file.size > 5 * 1024 * 1024) throw new Error("Agenda file is too large. Use a file below 5 MB.");
+  if (kind !== "document" && file.size > 6 * 1024 * 1024) throw new Error("Image is too large. Use a file below 6 MB.");
+  const dataUrl = file.type.startsWith("image/") ? await imageFileToDataUrl(file) : await readFileAsDataUrl(file);
+  return { name: file.name, type: file.type || "application/octet-stream", size: file.size, dataUrl, uploadedAt: new Date().toISOString() };
+}
 
 function qrPayload(delegate) {
   const eventId = typeof delegate.event === "object" ? delegate.event?._id : delegate.event;
@@ -55,13 +115,18 @@ function qrPayload(delegate) {
 function normalizeEvent(ev) {
   return {
     ...ev,
+    bannerUrl: ev?.bannerUrl || "",
+    bannerName: ev?.bannerName || "",
+    eventFiles: Array.isArray(ev?.eventFiles) ? ev.eventFiles : [],
     badgeTemplate: { ...DEFAULT_BADGE, ...(ev?.badgeTemplate || {}), fields: ev?.badgeTemplate?.fields?.length ? ev.badgeTemplate.fields : DEFAULT_BADGE.fields },
     printSettings: { ...DEFAULT_PRINT, ...(ev?.printSettings || {}) },
     registrationSettings: {
       photoUploadEnabled: true,
       emailConfirmationEnabled: true,
       requiredFields: ["fullName", "email"],
+      fieldModes: { fullName: "required", email: "required", phone: "optional", organization: "optional", jobTitle: "optional", country: "optional", category: "optional", photoUrl: "optional" },
       customFields: [],
+      categories: CATS,
       ...(ev?.registrationSettings || {}),
     },
   };
@@ -354,24 +419,54 @@ function DashboardView({ stats, delegates, selectedEvent, setView }) {
 
 function EventsView({ events, selectedEvent, refresh, showToast, canEdit }) {
   const [form, setForm] = useState(null);
-  const blank = { name: "", date: "", venue: "", organizer: "Afterglow Register", description: "", status: "open", themeColor: "#CF6B11", badgeTemplate: DEFAULT_BADGE, printSettings: DEFAULT_PRINT, registrationSettings: { photoUploadEnabled: true, emailConfirmationEnabled: true, requiredFields: ["fullName", "email"], customFields: [] } };
+  const defaultFieldModes = { fullName: "required", email: "required", phone: "optional", organization: "optional", jobTitle: "optional", country: "optional", category: "optional", photoUrl: "optional" };
+  const blank = {
+    name: "",
+    date: "",
+    venue: "",
+    organizer: "Afterglow Register",
+    description: "",
+    status: "open",
+    themeColor: "#CF6B11",
+    logoUrl: "/afterglow-logo.png",
+    bannerUrl: "",
+    bannerName: "",
+    eventFiles: [],
+    badgeTemplate: DEFAULT_BADGE,
+    printSettings: DEFAULT_PRINT,
+    registrationSettings: {
+      photoUploadEnabled: true,
+      emailConfirmationEnabled: true,
+      fieldModes: defaultFieldModes,
+      requiredFields: ["fullName", "email"],
+      customFields: [],
+      categories: CATS,
+    },
+  };
   const participantFields = [
-    ["fullName", "Full Name"],
-    ["email", "Email"],
-    ["phone", "Phone"],
-    ["organization", "Organization"],
-    ["jobTitle", "Job Title"],
-    ["country", "Country"],
-    ["category", "Category"],
-    ["photoUrl", "Participant Photo"],
+    ["fullName", "Full Name", "Basic identity"],
+    ["email", "Email", "For QR confirmation"],
+    ["phone", "Phone", "WhatsApp/contact"],
+    ["organization", "Organization", "Company / institution"],
+    ["jobTitle", "Job Title", "Position / role"],
+    ["country", "Country", "Participant country"],
+    ["category", "Category", "VIP, Delegate, Media..."],
+    ["photoUrl", "Participant Photo", "Used on badge"],
   ];
-  const toggleRequired = (key) => {
-    const current = form?.registrationSettings?.requiredFields || [];
-    const next = current.includes(key) ? current.filter((x) => x !== key) : [...current, key];
-    setForm({ ...form, registrationSettings: { ...(form.registrationSettings || {}), requiredFields: next } });
+  const getFieldMode = (key) => {
+    const modes = form?.registrationSettings?.fieldModes || {};
+    if (modes[key]) return modes[key];
+    return (form?.registrationSettings?.requiredFields || []).includes(key) ? "required" : "optional";
   };
   const updateRegistrationSetting = (key, value) => {
-    setForm({ ...form, registrationSettings: { ...(form.registrationSettings || {}), [key]: value } });
+    setForm((f) => ({ ...f, registrationSettings: { ...(f.registrationSettings || {}), [key]: value } }));
+  };
+  const setFieldMode = (key, value) => {
+    setForm((f) => {
+      const modes = { ...(f.registrationSettings?.fieldModes || defaultFieldModes), [key]: value };
+      const requiredFields = Object.entries(modes).filter(([, mode]) => mode === "required").map(([k]) => k);
+      return { ...f, registrationSettings: { ...(f.registrationSettings || {}), fieldModes: modes, requiredFields } };
+    });
   };
   const addCustomField = () => {
     const fields = form?.registrationSettings?.customFields || [];
@@ -384,9 +479,38 @@ function EventsView({ events, selectedEvent, refresh, showToast, canEdit }) {
     updateRegistrationSetting("customFields", fields);
   };
   const removeCustomField = (i) => updateRegistrationSetting("customFields", (form?.registrationSettings?.customFields || []).filter((_, idx) => idx !== i));
+  const uploadBanner = async (file) => {
+    if (!file) return;
+    try {
+      const asset = await fileToStoredAsset(file, "banner");
+      setForm((f) => ({ ...f, bannerUrl: asset.dataUrl, bannerName: asset.name }));
+      showToast("Banner added. Save the event to keep it.");
+    } catch (e) { showToast(e.message, "error"); }
+  };
+  const addEventFile = async (file) => {
+    if (!file) return;
+    try {
+      const asset = await fileToStoredAsset(file, "document");
+      setForm((f) => ({ ...f, eventFiles: [...(f.eventFiles || []), asset] }));
+      showToast("Event file added. Save the event to keep it.");
+    } catch (e) { showToast(e.message, "error"); }
+  };
+  const removeEventFile = (index) => setForm((f) => ({ ...f, eventFiles: (f.eventFiles || []).filter((_, i) => i !== index) }));
   const save = async () => {
     if (!form.name || !form.date) return showToast("Event name and date are required", "error");
-    const body = { ...form, date: form.date };
+    const categories = String(form.registrationSettings?.categoriesText || "")
+      .split(",")
+      .map((x) => x.trim())
+      .filter(Boolean);
+    const body = {
+      ...form,
+      date: form.date,
+      registrationSettings: {
+        ...(form.registrationSettings || {}),
+        categories: categories.length ? categories : CATS,
+      },
+    };
+    delete body.registrationSettings.categoriesText;
     if (form._id) await api(`/api/events/${form._id}`, { method: "PUT", body: JSON.stringify(body) });
     else await api("/api/events", { method: "POST", body: JSON.stringify(body) });
     setForm(null); showToast("Event saved"); refresh();
@@ -396,9 +520,14 @@ function EventsView({ events, selectedEvent, refresh, showToast, canEdit }) {
     await navigator.clipboard.writeText(url);
     showToast("Public registration link copied");
   };
+  const openForm = (event) => {
+    const ev = event ? normalizeEvent(event) : blank;
+    const categories = ev.registrationSettings?.categories?.length ? ev.registrationSettings.categories : CATS;
+    setForm({ ...ev, date: ev.date ? String(ev.date).slice(0,10) : "", registrationSettings: { ...ev.registrationSettings, fieldModes: { ...defaultFieldModes, ...(ev.registrationSettings?.fieldModes || {}) }, categoriesText: categories.join(", ") } });
+  };
   return (
     <div>
-      {canEdit && <div className="toolbar"><button className="btn primary" onClick={() => setForm(blank)}><i className="ti ti-plus" /> New event</button></div>}
+      {canEdit && <div className="toolbar"><button className="btn primary" onClick={() => openForm(null)}><i className="ti ti-plus" /> New event</button></div>}
       <div className="event-grid">
         {events.map((e) => <div key={e._id} className="event-card">
           <div className="event-color" style={{ background: e.themeColor || "var(--accent)" }} />
@@ -408,27 +537,51 @@ function EventsView({ events, selectedEvent, refresh, showToast, canEdit }) {
           <p>{e.description || "No description"}</p>
           <div className="row-actions">
             <button className="btn ghost" onClick={() => copyLink(e._id)}><i className="ti ti-link" /> Registration link</button>
-            {canEdit && <button className="btn ghost" onClick={() => setForm({ ...normalizeEvent(e), date: e.date ? String(e.date).slice(0,10) : "" })}><i className="ti ti-edit" /> Edit</button>}
+            {canEdit && <button className="btn ghost" onClick={() => openForm(e)}><i className="ti ti-edit" /> Edit</button>}
           </div>
         </div>)}
       </div>
       {form && <Modal title={form._id ? "Edit event" : "New event"} onClose={() => setForm(null)}>
         <div className="form-grid two">
+          <div className="form-section full"><h3>Event basics</h3><p className="small-muted">Information shown in the dashboard, public form, badge and reports.</p></div>
           <Field label="Event name"><input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></Field>
           <Field label="Date"><input type="date" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} /></Field>
           <Field label="Venue"><input value={form.venue || ""} onChange={(e) => setForm({ ...form, venue: e.target.value })} /></Field>
           <Field label="Organizer"><input value={form.organizer || ""} onChange={(e) => setForm({ ...form, organizer: e.target.value })} /></Field>
           <Field label="Theme color"><input type="color" value={form.themeColor || "#CF6B11"} onChange={(e) => setForm({ ...form, themeColor: e.target.value })} /></Field>
-          <Field label="Status"><select value={form.status || "open"} onChange={(e) => setForm({ ...form, status: e.target.value })}><option value="open">Open</option><option value="closed">Closed</option></select></Field>
+          <Field label="Registration status"><select value={form.status || "open"} onChange={(e) => setForm({ ...form, status: e.target.value })}><option value="open">Open</option><option value="closed">Closed</option></select></Field>
+          <Field label="Event logo URL"><input value={form.logoUrl || ""} onChange={(e) => setForm({ ...form, logoUrl: e.target.value })} placeholder="/afterglow-logo.png" /></Field>
+          <Field label="Participant categories" full><textarea value={form.registrationSettings?.categoriesText || ""} onChange={(e) => updateRegistrationSetting("categoriesText", e.target.value)} placeholder="VIP, Speaker, Delegate, Media" /></Field>
           <Field label="Description" full><textarea value={form.description || ""} onChange={(e) => setForm({ ...form, description: e.target.value })} /></Field>
           <div className="form-section full">
+            <h3>Public registration media</h3>
+            <p className="small-muted">Add a banner image and agenda/programme files. They appear on the public registration link.</p>
+            <Field label="Event banner image" full>
+              <input type="file" accept="image/*" onChange={(e) => uploadBanner(e.target.files?.[0])} />
+              {form.bannerUrl && <div className="event-banner-preview"><img src={form.bannerUrl} alt="Event banner preview" /><button type="button" className="btn ghost" onClick={() => setForm({ ...form, bannerUrl: "", bannerName: "" })}>Remove banner</button></div>}
+            </Field>
+            <Field label="Agenda / programme files" full>
+              <input type="file" accept="application/pdf,image/*" onChange={(e) => addEventFile(e.target.files?.[0])} />
+              <div className="file-list">
+                {(form.eventFiles || []).map((file, index) => <div className="event-file-row" key={`${file.name}-${index}`}><span><b>{file.name}</b><small>{file.type || "file"} · {formatBytes(file.size)}</small></span><a className="btn ghost" href={file.dataUrl} download={file.name}>Open</a><button type="button" className="icon-btn danger" onClick={() => removeEventFile(index)}><i className="ti ti-trash" /></button></div>)}
+              </div>
+            </Field>
+          </div>
+          <div className="form-section full">
             <h3>Participant form settings</h3>
-            <p className="small-muted">Choose what participants must fill for this event.</p>
-            <div className="check-grid">
-              {participantFields.map(([key, label]) => <label key={key} className="check-row"><input type="checkbox" checked={(form.registrationSettings?.requiredFields || []).includes(key)} onChange={() => toggleRequired(key)} /> Required: {label}</label>)}
+            <p className="small-muted">Choose whether each field is required, optional, or hidden for this event.</p>
+            <div className="field-mode-grid">
+              {participantFields.map(([key, label, hint]) => <div key={key} className="field-mode-card">
+                <div><b>{label}</b><span>{hint}</span></div>
+                <select value={getFieldMode(key)} onChange={(e) => setFieldMode(key, e.target.value)}>
+                  <option value="required">Required</option>
+                  <option value="optional">Optional</option>
+                  <option value="hidden">Hidden</option>
+                </select>
+              </div>)}
             </div>
             <div className="check-grid compact-checks">
-              <label className="check-row"><input type="checkbox" checked={form.registrationSettings?.photoUploadEnabled !== false} onChange={(e) => updateRegistrationSetting("photoUploadEnabled", e.target.checked)} /> Show participant photo upload</label>
+              <label className="check-row"><input type="checkbox" checked={form.registrationSettings?.photoUploadEnabled !== false} onChange={(e) => updateRegistrationSetting("photoUploadEnabled", e.target.checked)} /> Allow participant photo upload</label>
               <label className="check-row"><input type="checkbox" checked={form.registrationSettings?.emailConfirmationEnabled !== false} onChange={(e) => updateRegistrationSetting("emailConfirmationEnabled", e.target.checked)} /> Send confirmation email / simulation</label>
             </div>
             <h4>Custom fields</h4>
@@ -498,15 +651,42 @@ function RegisterView({ selectedEvent, loadDelegates, showToast }) {
 
 function PublicRegister({ eventId, settings, showToast, Toast }) {
   const [done, setDone] = useState(null);
-  const event = { _id: eventId, name: "Public Event", registrationSettings: { photoUploadEnabled: true, emailConfirmationEnabled: true, requiredFields: ["fullName", "email"] } };
+  const [event, setEvent] = useState(null);
+  const [loadingEvent, setLoadingEvent] = useState(true);
+  useEffect(() => {
+    let alive = true;
+    setLoadingEvent(true);
+    api(`/api/public/events/${eventId}`)
+      .then((res) => { if (alive) setEvent(normalizeEvent(res.event)); })
+      .catch((e) => { showToast(e.message, "error"); if (alive) setEvent({ _id: eventId, name: "Public Event", registrationSettings: { photoUploadEnabled: true, emailConfirmationEnabled: true, requiredFields: ["fullName", "email"] } }); })
+      .finally(() => alive && setLoadingEvent(false));
+    return () => { alive = false; };
+  }, [eventId]);
   return (
     <div className="public-page">
       <style>{styles}</style>
       <div className="public-brand"><img className="brand-img" src={settings?.logoUrl || "/afterglow-logo.png"} alt="Afterglow logo" /><div><b>{settings?.systemName || "Afterglow Register"}</b><span>Public registration</span></div></div>
-      <RegistrationForm event={event} publicMode onDone={(delegate, email) => setDone({ delegate, email })} showToast={showToast} done={done} setDone={setDone} />
+      {loadingEvent ? <div className="panel register-panel"><Empty text="Loading event form..." /></div> : <>
+        <PublicEventHeader event={event} />
+        <RegistrationForm event={event} publicMode onDone={(delegate, email) => setDone({ delegate, email })} showToast={showToast} done={done} setDone={setDone} />
+      </>}
       <Toast />
     </div>
   );
+}
+
+function PublicEventHeader({ event }) {
+  if (!event) return null;
+  const files = Array.isArray(event.eventFiles) ? event.eventFiles : [];
+  return <div className="public-event-header">
+    {event.bannerUrl && <img className="public-event-banner" src={event.bannerUrl} alt={`${event.name || "Event"} banner`} />}
+    <div className="public-event-info panel">
+      <h1>{event.name || "Event registration"}</h1>
+      <div className="public-event-meta"><span><i className="ti ti-calendar" /> {fmtDate(event.date)}</span><span><i className="ti ti-map-pin" /> {event.venue || "Venue to be confirmed"}</span><span><i className="ti ti-building" /> {event.organizer || "Afterglow Register"}</span></div>
+      {event.description && <p>{event.description}</p>}
+      {files.length > 0 && <div className="public-file-list"><h3>Event agenda / files</h3>{files.map((file, index) => <a key={`${file.name}-${index}`} href={file.dataUrl} download={file.name} target="_blank" rel="noreferrer"><i className="ti ti-file-download" /><span>{file.name}</span><small>{formatBytes(file.size)}</small></a>)}</div>}
+    </div>
+  </div>;
 }
 
 function RegistrationForm({ event, publicMode, authMode, onDone, showToast, done, setDone }) {
@@ -514,17 +694,20 @@ function RegistrationForm({ event, publicMode, authMode, onDone, showToast, done
   const [cropSrc, setCropSrc] = useState(null);
   const [busy, setBusy] = useState(false);
   const registrationSettings = event?.registrationSettings || {};
-  const requiredFields = registrationSettings.requiredFields || ["fullName", "email"];
-  const isRequired = (key) => requiredFields.includes(key);
+  const legacyRequiredFields = registrationSettings.requiredFields || ["fullName", "email"];
+  const fieldModes = registrationSettings.fieldModes || {};
+  const getMode = (key) => fieldModes[key] || (legacyRequiredFields.includes(key) ? "required" : "optional");
+  const isHidden = (key) => getMode(key) === "hidden";
+  const isRequired = (key) => getMode(key) === "required";
   const fieldLabel = (key, label) => `${label}${isRequired(key) ? " *" : ""}`;
-  const showPhotoUpload = registrationSettings.photoUploadEnabled !== false;
+  const showPhotoUpload = registrationSettings.photoUploadEnabled !== false && !isHidden("photoUrl");
+  const categories = registrationSettings.categories?.length ? registrationSettings.categories : CATS;
   const setCustomField = (key, value) => setForm((f) => ({ ...f, customFields: { ...(f.customFields || {}), [key]: value } }));
   const register = async () => {
     if (!event?._id) return showToast("No event selected", "error");
     const labels = { fullName: "Full name", email: "Email", phone: "Phone", organization: "Organization", jobTitle: "Job title", country: "Country", category: "Category", photoUrl: "Participant photo" };
-    for (const key of requiredFields) {
-      if (key === "photoUrl" && !showPhotoUpload) continue;
-      if (!form[key]) return showToast(`${labels[key] || key} is required`, "error");
+    for (const key of Object.keys(labels)) {
+      if (isRequired(key) && !isHidden(key) && !(key === "photoUrl" && !showPhotoUpload) && !form[key]) return showToast(`${labels[key]} is required`, "error");
     }
     for (const cf of registrationSettings.customFields || []) {
       if (cf.required && !form.customFields?.[cf.key]) return showToast(`${cf.label || cf.key} is required`, "error");
@@ -542,7 +725,8 @@ function RegistrationForm({ event, publicMode, authMode, onDone, showToast, done
           email = { status: "failed", error: emailError.message };
         }
       }
-      showToast(email?.status === "sent" ? "Registration complete and email sent" : "Registration complete. Email simulation saved.");
+      const msg = email?.status === "sent" ? "Registration complete and email sent" : email?.status === "failed" ? `Registration saved, but email failed: ${email.error || "check backend SMTP settings"}` : "Registration complete. Email simulation saved.";
+      showToast(msg, email?.status === "failed" ? "error" : "success");
       onDone(res.delegate, email);
     } catch (e) { showToast(e.message, "error"); } finally { setBusy(false); }
   };
@@ -557,20 +741,20 @@ function RegistrationForm({ event, publicMode, authMode, onDone, showToast, done
     <h2>Registration complete</h2>
     <p>Your QR code has been prepared. Present it at the event entrance.</p>
     <div className="qr-card"><QRCodeCanvas value={qrPayload(done.delegate)} size={190} /><span>{done.delegate.delegateId}</span></div>
-    <div className="alert"><b>Email status:</b> {done.email?.status || "saved"}</div>
+    <div className={`alert ${done.email?.status === "failed" ? "error" : ""}`}><b>Email status:</b> {done.email?.status || "saved"}{done.email?.error ? <><br/><small>{done.email.error}</small></> : null}</div>
     <button className="btn primary" onClick={() => { setDone(null); setForm({ fullName: "", email: "", phone: "", organization: "", jobTitle: "", country: "Rwanda", category: "Delegate", photoUrl: "", customFields: {} }); }}>Register another</button>
   </div>;
   return <div className="panel register-panel">
     <h2>Participant registration</h2>
     <p className="small-muted">{event?.name || "Selected event"}</p>
     <div className="form-grid two">
-      <Field label={fieldLabel("fullName", "Full name")} full><input value={form.fullName} onChange={(e) => setForm({ ...form, fullName: e.target.value })} /></Field>
-      <Field label={fieldLabel("email", "Email")}><input type="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} /></Field>
-      <Field label={fieldLabel("phone", "Phone")}><input value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} /></Field>
-      <Field label={fieldLabel("organization", "Organization")}><input value={form.organization} onChange={(e) => setForm({ ...form, organization: e.target.value })} /></Field>
-      <Field label={fieldLabel("jobTitle", "Job title")}><input value={form.jobTitle} onChange={(e) => setForm({ ...form, jobTitle: e.target.value })} /></Field>
-      <Field label={fieldLabel("country", "Country")}><input value={form.country} onChange={(e) => setForm({ ...form, country: e.target.value })} /></Field>
-      <Field label={fieldLabel("category", "Category")}><select value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })}>{CATS.map((c) => <option key={c}>{c}</option>)}</select></Field>
+      {!isHidden("fullName") && <Field label={fieldLabel("fullName", "Full name")} full><input value={form.fullName} onChange={(e) => setForm({ ...form, fullName: e.target.value })} /></Field>}
+      {!isHidden("email") && <Field label={fieldLabel("email", "Email")}><input type="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} /></Field>}
+      {!isHidden("phone") && <Field label={fieldLabel("phone", "Phone")}><input value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} /></Field>}
+      {!isHidden("organization") && <Field label={fieldLabel("organization", "Organization")}><input value={form.organization} onChange={(e) => setForm({ ...form, organization: e.target.value })} /></Field>}
+      {!isHidden("jobTitle") && <Field label={fieldLabel("jobTitle", "Job title")}><input value={form.jobTitle} onChange={(e) => setForm({ ...form, jobTitle: e.target.value })} /></Field>}
+      {!isHidden("country") && <Field label={fieldLabel("country", "Country")}><input value={form.country} onChange={(e) => setForm({ ...form, country: e.target.value })} /></Field>}
+      {!isHidden("category") && <Field label={fieldLabel("category", "Category")}><select value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })}>{categories.map((c) => <option key={c}>{c}</option>)}</select></Field>}
       {(registrationSettings.customFields || []).map((cf) => <Field key={cf.key} label={`${cf.label || cf.key}${cf.required ? " *" : ""}`}>
         <input type={cf.type || "text"} value={form.customFields?.[cf.key] || ""} onChange={(e) => setCustomField(cf.key, e.target.value)} />
       </Field>)}
@@ -646,47 +830,82 @@ function BadgesView({ delegates, selectedEvent }) {
 function BadgeDesignerView({ selectedEvent, refresh, showToast }) {
   const [tmpl, setTmpl] = useState(selectedEvent?.badgeTemplate || DEFAULT_BADGE);
   const [print, setPrint] = useState(selectedEvent?.printSettings || DEFAULT_PRINT);
-  useEffect(() => { setTmpl(selectedEvent?.badgeTemplate || DEFAULT_BADGE); setPrint(selectedEvent?.printSettings || DEFAULT_PRINT); }, [selectedEvent?._id]);
-  const demo = { fullName: "Samuel Ishimwe", organization: "Afterglow", jobTitle: "Event Manager", category: "VIP", delegateId: "DEL-DEMO", qrToken: "DEMO", event: selectedEvent?._id };
+  useEffect(() => { setTmpl({ ...DEFAULT_BADGE, ...(selectedEvent?.badgeTemplate || {}) }); setPrint(selectedEvent?.printSettings || DEFAULT_PRINT); }, [selectedEvent?._id]);
+  const demo = { fullName: "Samuel Ishimwe", organization: "Afterglow", jobTitle: "Event Manager", category: "VIP", email: "samuel@example.com", phone: "+250 788 000 000", country: "Rwanda", delegateId: "DEL-DEMO", qrToken: "DEMO", event: selectedEvent?._id, photoUrl: "/afterglow-logo-192.png", customFields: { table: "A1", hotel: "Kigali" } };
+  const allTextKeys = ["fullName","organization","jobTitle","category","email","phone","country","delegateId","eventName", ...((selectedEvent?.registrationSettings?.customFields || []).map((f) => `customFields.${f.key}`))];
   const save = async () => {
     await api(`/api/events/${selectedEvent._id}`, { method: "PUT", body: JSON.stringify({ badgeTemplate: tmpl, printSettings: print }) });
     showToast("Badge and print settings saved"); refresh();
   };
   const uploadBg = async (file) => {
     if (!file) return;
+    if (file.type === "application/pdf") showToast("PDF backgrounds may not preview in browsers. PNG/JPG is recommended for exact badge output.", "error");
     const fd = new FormData(); fd.append("file", file);
     const res = await api("/api/uploads", { method: "POST", body: fd });
     setTmpl((t) => ({ ...t, backgroundUrl: res.url }));
   };
+  const updateField = (i, key, value) => setTmpl((t) => ({ ...t, fields: (t.fields || DEFAULT_BADGE.fields).map((x, j) => j === i ? { ...x, [key]: value } : x) }));
+  const removeField = (i) => setTmpl((t) => ({ ...t, fields: (t.fields || DEFAULT_BADGE.fields).filter((_, j) => j !== i) }));
   if (!selectedEvent?._id) return <Empty text="Create/select an event first" />;
-  return <div className="designer-grid">
+  return <div className="designer-grid pro-designer">
     <div className="panel">
       <h2>Badge designer</h2>
-      <div className="form-grid two">
+      <p className="small-muted">Use percentages for X/Y/size so the badge scales correctly on A6, A5, CR80, and custom paper.</p>
+      <div className="designer-section"><h3>Background</h3><div className="form-grid two">
         <Field label="Background color"><input type="color" value={tmpl.bgColor || "#1A1A19"} onChange={(e) => setTmpl({ ...tmpl, bgColor: e.target.value })} /></Field>
-        <Field label="Upload background"><input type="file" accept="image/*,.pdf" onChange={(e) => uploadBg(e.target.files?.[0])} /></Field>
-        <Field label="QR X"><input type="number" value={tmpl.qrX} onChange={(e) => setTmpl({ ...tmpl, qrX: +e.target.value })} /></Field>
-        <Field label="QR Y"><input type="number" value={tmpl.qrY} onChange={(e) => setTmpl({ ...tmpl, qrY: +e.target.value })} /></Field>
-        <Field label="QR Size"><input type="number" value={tmpl.qrSize} onChange={(e) => setTmpl({ ...tmpl, qrSize: +e.target.value })} /></Field>
-        <Field label="Participant photo"><select value={String(tmpl.showPhoto !== false)} onChange={(e) => setTmpl({ ...tmpl, showPhoto: e.target.value === "true" })}><option value="true">Show on badge</option><option value="false">Hide from badge</option></select></Field>
+        <Field label="Background fit"><select value={tmpl.backgroundFit || "cover"} onChange={(e) => setTmpl({ ...tmpl, backgroundFit: e.target.value })}><option value="cover">Cover</option><option value="contain">Contain</option><option value="stretch">Stretch</option></select></Field>
+        <Field label="Upload background" full><input type="file" accept="image/*,.pdf" onChange={(e) => uploadBg(e.target.files?.[0])} />{tmpl.backgroundUrl && <small className="small-muted">Current: {tmpl.backgroundUrl}</small>}</Field>
+      </div></div>
+      <div className="designer-section"><h3>Event title</h3><div className="form-grid two">
+        <Field label="Show event name"><select value={String(tmpl.showEventTitle !== false)} onChange={(e) => setTmpl({ ...tmpl, showEventTitle: e.target.value === "true" })}><option value="true">Show</option><option value="false">Hide</option></select></Field>
+        <Field label="Uppercase"><select value={String(tmpl.eventTitleUppercase !== false)} onChange={(e) => setTmpl({ ...tmpl, eventTitleUppercase: e.target.value === "true" })}><option value="true">Yes</option><option value="false">No</option></select></Field>
+        <Field label="Title X"><input type="number" value={tmpl.eventTitleX || 50} onChange={(e) => setTmpl({ ...tmpl, eventTitleX: +e.target.value })} /></Field>
+        <Field label="Title Y"><input type="number" value={tmpl.eventTitleY || 5} onChange={(e) => setTmpl({ ...tmpl, eventTitleY: +e.target.value })} /></Field>
+        <Field label="Title size"><input type="number" value={tmpl.eventTitleSize || 9} onChange={(e) => setTmpl({ ...tmpl, eventTitleSize: +e.target.value })} /></Field>
+        <Field label="Title color"><input type="color" value={tmpl.eventTitleColor || "#E8B267"} onChange={(e) => setTmpl({ ...tmpl, eventTitleColor: e.target.value })} /></Field>
+      </div></div>
+      <div className="designer-section"><h3>Participant photo</h3><div className="form-grid two">
+        <Field label="Photo on badge"><select value={String(tmpl.showPhoto !== false)} onChange={(e) => setTmpl({ ...tmpl, showPhoto: e.target.value === "true" })}><option value="true">Show</option><option value="false">Hide</option></select></Field>
+        <Field label="Show placeholder"><select value={String(tmpl.showPhotoPlaceholder !== false)} onChange={(e) => setTmpl({ ...tmpl, showPhotoPlaceholder: e.target.value === "true" })}><option value="true">Yes</option><option value="false">No</option></select></Field>
         <Field label="Photo X"><input type="number" value={tmpl.photoX || 50} onChange={(e) => setTmpl({ ...tmpl, photoX: +e.target.value })} /></Field>
         <Field label="Photo Y"><input type="number" value={tmpl.photoY || 19} onChange={(e) => setTmpl({ ...tmpl, photoY: +e.target.value })} /></Field>
-        <Field label="Photo Size"><input type="number" value={tmpl.photoSize || 21} onChange={(e) => setTmpl({ ...tmpl, photoSize: +e.target.value })} /></Field>
+        <Field label="Photo size"><input type="number" value={tmpl.photoSize || 21} onChange={(e) => setTmpl({ ...tmpl, photoSize: +e.target.value })} /></Field>
+        <Field label="Photo shape"><select value={tmpl.photoShape || "circle"} onChange={(e) => setTmpl({ ...tmpl, photoShape: e.target.value })}><option value="circle">Circle</option><option value="rounded">Rounded</option><option value="square">Square</option></select></Field>
+        <Field label="Photo fit"><select value={tmpl.photoFit || "cover"} onChange={(e) => setTmpl({ ...tmpl, photoFit: e.target.value })}><option value="cover">Cover</option><option value="contain">Contain</option></select></Field>
+        <Field label="Border color"><input type="color" value={tmpl.photoBorderColor || "#ffffff"} onChange={(e) => setTmpl({ ...tmpl, photoBorderColor: e.target.value })} /></Field>
+        <Field label="Border width"><input type="number" value={tmpl.photoBorderWidth ?? 2} onChange={(e) => setTmpl({ ...tmpl, photoBorderWidth: +e.target.value })} /></Field>
+      </div></div>
+      <div className="designer-section"><h3>QR code</h3><div className="form-grid two">
+        <Field label="Show QR"><select value={String(tmpl.showQR !== false)} onChange={(e) => setTmpl({ ...tmpl, showQR: e.target.value === "true" })}><option value="true">Show</option><option value="false">Hide</option></select></Field>
+        <Field label="QR background"><select value={String(tmpl.qrBackground !== false)} onChange={(e) => setTmpl({ ...tmpl, qrBackground: e.target.value === "true" })}><option value="true">White box</option><option value="false">Transparent</option></select></Field>
+        <Field label="QR X"><input type="number" value={tmpl.qrX || 50} onChange={(e) => setTmpl({ ...tmpl, qrX: +e.target.value })} /></Field>
+        <Field label="QR Y"><input type="number" value={tmpl.qrY || 32} onChange={(e) => setTmpl({ ...tmpl, qrY: +e.target.value })} /></Field>
+        <Field label="QR size"><input type="number" value={tmpl.qrSize || 24} onChange={(e) => setTmpl({ ...tmpl, qrSize: +e.target.value })} /></Field>
+        <Field label="QR padding"><input type="number" value={tmpl.qrPadding ?? 5} onChange={(e) => setTmpl({ ...tmpl, qrPadding: +e.target.value })} /></Field>
+      </div></div>
+      <div className="designer-section"><h3>Print setup</h3><div className="form-grid two">
         <Field label="Paper size"><select value={print.paperSize} onChange={(e) => setPrint({ ...print, paperSize: e.target.value })}>{["A6", "A5", "A4", "CR80", "EVENT_BADGE", "CUSTOM"].map((p) => <option key={p}>{p}</option>)}</select></Field>
         <Field label="Auto print"><select value={String(print.autoPrintAfterCheckin)} onChange={(e) => setPrint({ ...print, autoPrintAfterCheckin: e.target.value === "true" })}><option value="true">On</option><option value="false">Off</option></select></Field>
         <Field label="Margin mm"><input type="number" value={print.marginMm} onChange={(e) => setPrint({ ...print, marginMm: +e.target.value })} /></Field>
+        <Field label="Custom width mm"><input type="number" value={print.customWidthMm || 105} onChange={(e) => setPrint({ ...print, customWidthMm: +e.target.value })} /></Field>
+        <Field label="Custom height mm"><input type="number" value={print.customHeightMm || 148} onChange={(e) => setPrint({ ...print, customHeightMm: +e.target.value })} /></Field>
+      </div></div>
+      <div className="designer-section"><h3>Text fields</h3>
+        {(tmpl.fields || DEFAULT_BADGE.fields).map((f, i) => <div key={i} className="field-row enhanced-field-row">
+          <select value={f.key} onChange={(e) => updateField(i, "key", e.target.value)}>{allTextKeys.map((k) => <option key={k}>{k}</option>)}</select>
+          <input value={f.label || f.key} onChange={(e) => updateField(i, "label", e.target.value)} placeholder="Label" />
+          <input type="number" value={f.x} onChange={(e) => updateField(i, "x", +e.target.value)} title="X" />
+          <input type="number" value={f.y} onChange={(e) => updateField(i, "y", +e.target.value)} title="Y" />
+          <input type="number" value={f.size} onChange={(e) => updateField(i, "size", +e.target.value)} title="Size" />
+          <select value={f.weight || "normal"} onChange={(e) => updateField(i, "weight", e.target.value)}><option>normal</option><option>bold</option><option>800</option></select>
+          <select value={f.align || "center"} onChange={(e) => updateField(i, "align", e.target.value)}><option>center</option><option>left</option><option>right</option></select>
+          <input type="color" value={f.color || "#ffffff"} onChange={(e) => updateField(i, "color", e.target.value)} />
+          <button className="icon-btn danger" onClick={() => removeField(i)}><i className="ti ti-trash" /></button>
+        </div>)}
+        <div className="modal-actions"><button className="btn ghost" onClick={() => setTmpl((t) => ({ ...t, fields: [...(t.fields || []), { key: "fullName", label: "Full Name", x: 50, y: 90, size: 12, color: "#fff", weight: "normal", align: "center" }] }))}>Add text field</button><button className="btn primary" onClick={save}>Save design</button></div>
       </div>
-      <h3>Text fields</h3>
-      {tmpl.fields.map((f, i) => <div key={i} className="field-row">
-        <select value={f.key} onChange={(e) => setTmpl((t) => ({ ...t, fields: t.fields.map((x, j) => j === i ? { ...x, key: e.target.value } : x) }))}>{["fullName","organization","jobTitle","category","email","phone","country","delegateId"].map((k) => <option key={k}>{k}</option>)}</select>
-        <input type="number" value={f.x} onChange={(e) => setTmpl((t) => ({ ...t, fields: t.fields.map((x, j) => j === i ? { ...x, x: +e.target.value } : x) }))} title="X" />
-        <input type="number" value={f.y} onChange={(e) => setTmpl((t) => ({ ...t, fields: t.fields.map((x, j) => j === i ? { ...x, y: +e.target.value } : x) }))} title="Y" />
-        <input type="number" value={f.size} onChange={(e) => setTmpl((t) => ({ ...t, fields: t.fields.map((x, j) => j === i ? { ...x, size: +e.target.value } : x) }))} title="Size" />
-        <input type="color" value={f.color} onChange={(e) => setTmpl((t) => ({ ...t, fields: t.fields.map((x, j) => j === i ? { ...x, color: e.target.value } : x) }))} />
-      </div>)}
-      <div className="modal-actions"><button className="btn ghost" onClick={() => setTmpl((t) => ({ ...t, fields: [...t.fields, { key: "fullName", x: 50, y: 90, size: 12, color: "#fff", weight: "normal", align: "center" }] }))}>Add field</button><button className="btn primary" onClick={save}>Save design</button></div>
     </div>
-    <div className="panel preview-panel"><h3>Preview</h3><BadgeView delegate={demo} event={{ ...selectedEvent, badgeTemplate: tmpl, printSettings: print }} size={280} /><button className="btn ghost full" onClick={() => printBadges([demo], { ...selectedEvent, badgeTemplate: tmpl, printSettings: print })}>Test print</button></div>
+    <div className="panel preview-panel"><h3>Live preview</h3><BadgeView delegate={demo} event={{ ...selectedEvent, badgeTemplate: tmpl, printSettings: print }} size={300} /><button className="btn ghost full" onClick={() => printBadges([demo], { ...selectedEvent, badgeTemplate: tmpl, printSettings: print })}>Test print</button></div>
   </div>;
 }
 
@@ -764,15 +983,43 @@ function SettingsView({ settings, setSettings, showToast }) {
   </div>;
 }
 
+function badgeRadius(shape) {
+  if (shape === "square") return "0";
+  if (shape === "rounded") return "14%";
+  return "50%";
+}
+function bgFit(fit) {
+  if (fit === "contain") return "contain";
+  if (fit === "stretch") return "fill";
+  return "cover";
+}
+function delegateValue(delegate, key, event) {
+  if (key === "eventName") return event?.name || "Afterglow Register";
+  if (key?.startsWith("customFields.")) return delegate?.customFields?.[key.replace("customFields.", "")];
+  return delegate?.[key];
+}
+function photoStyle(t) {
+  return {
+    left: `${t.photoX || 50}%`,
+    top: `${t.photoY || 18}%`,
+    width: `${t.photoSize || 20}%`,
+    height: `${t.photoSize || 20}%`,
+    borderRadius: badgeRadius(t.photoShape),
+    border: `${t.photoBorderWidth ?? 2}px solid ${t.photoBorderColor || "#fff"}`,
+    objectFit: t.photoFit || "cover",
+  };
+}
 function BadgeView({ delegate, event, size = 220 }) {
-  const t = event?.badgeTemplate || DEFAULT_BADGE;
+  const t = { ...DEFAULT_BADGE, ...(event?.badgeTemplate || {}) };
   const w = size, h = Math.round(size * 1.42);
+  const photoSrc = delegate.photoUrl || (t.showPhotoPlaceholder !== false ? "/afterglow-logo-192.png" : "");
+  const titleText = t.eventTitleUppercase === false ? (event?.name || "Afterglow Register") : String(event?.name || "Afterglow Register").toUpperCase();
   return <div className="badge-view" style={{ width: w, height: h, background: t.bgColor || "#111" }}>
-    {t.backgroundUrl && <img className="badge-bg" src={t.backgroundUrl} alt="badge background" />}
-    <div className="badge-event">{event?.name || "Afterglow Register"}</div>
-    {t.showPhoto && delegate.photoUrl && <img src={delegate.photoUrl} className="badge-photo" style={{ left: `${t.photoX || 50}%`, top: `${t.photoY || 18}%`, width: `${t.photoSize || 20}%`, height: `${t.photoSize || 20}%` }} alt="photo" />}
-    <div className="badge-qr" style={{ left: `${t.qrX || 50}%`, top: `${t.qrY || 32}%`, width: `${t.qrSize || 24}%` }}><QRCodeCanvas value={qrPayload(delegate)} size={120} style={{ width: "100%", height: "auto" }} /></div>
-    {(t.fields || DEFAULT_BADGE.fields).map((f, i) => <div key={i} className="badge-field" style={{ left: `${f.x}%`, top: `${f.y}%`, fontSize: Math.round((f.size || 12) * size / 220), color: f.color, fontWeight: f.weight, textAlign: f.align || "center" }}>{safe(delegate[f.key])}</div>)}
+    {t.backgroundUrl && <img className="badge-bg" src={t.backgroundUrl} style={{ objectFit: bgFit(t.backgroundFit) }} alt="badge background" />}
+    {t.showEventTitle !== false && <div className="badge-event" style={{ left: `${t.eventTitleX || 50}%`, top: `${t.eventTitleY || 5}%`, fontSize: Math.round((t.eventTitleSize || 9) * size / 220), color: t.eventTitleColor || "#E8B267", fontWeight: t.eventTitleWeight || "bold" }}>{titleText}</div>}
+    {t.showPhoto !== false && photoSrc && <img src={photoSrc} className="badge-photo" style={photoStyle(t)} alt="photo" />}
+    {t.showQR !== false && <div className="badge-qr" style={{ left: `${t.qrX || 50}%`, top: `${t.qrY || 32}%`, width: `${t.qrSize || 24}%`, background: t.qrBackground === false ? "transparent" : "white", padding: t.qrBackground === false ? 0 : (t.qrPadding ?? 5), borderRadius: t.qrRadius ?? 6 }}><QRCodeCanvas value={qrPayload(delegate)} size={120} style={{ width: "100%", height: "auto" }} /></div>}
+    {(t.fields || DEFAULT_BADGE.fields).map((f, i) => <div key={i} className="badge-field" style={{ left: `${f.x}%`, top: `${f.y}%`, fontSize: Math.round((f.size || 12) * size / 220), color: f.color, fontWeight: f.weight, textAlign: f.align || "center" }}>{safe(delegateValue(delegate, f.key, event))}</div>)}
   </div>;
 }
 
@@ -782,15 +1029,21 @@ async function printBadges(delegates, event) {
   const htmlBadges = [];
   for (const d of delegates) {
     const qr = await QRCode.toDataURL(qrPayload(d), { width: 280, margin: 1 });
-    const t = ev.badgeTemplate || DEFAULT_BADGE;
-    htmlBadges.push(`<section class="print-page"><div class="print-badge" style="background:${t.bgColor || "#111"}">${t.backgroundUrl ? `<img class="print-bg" src="${t.backgroundUrl}"/>` : ""}<div class="print-event">${escapeHtml(ev.name || "Afterglow Register")}</div>${t.showPhoto && d.photoUrl ? `<img class="print-photo" src="${d.photoUrl}" style="left:${t.photoX || 50}%;top:${t.photoY || 18}%;width:${t.photoSize || 20}%;height:${t.photoSize || 20}%"/>` : ""}<img class="print-qr" src="${qr}" style="left:${t.qrX || 50}%;top:${t.qrY || 32}%;width:${t.qrSize || 24}%"/>${(t.fields || DEFAULT_BADGE.fields).map((f) => `<div class="print-field" style="left:${f.x}%;top:${f.y}%;font-size:${f.size || 12}pt;color:${f.color};font-weight:${f.weight};text-align:${f.align || "center"}">${escapeHtml(safe(d[f.key]))}</div>`).join("")}</div></section>`);
+    const t = { ...DEFAULT_BADGE, ...(ev.badgeTemplate || {}) };
+    const photoSrc = d.photoUrl || (t.showPhotoPlaceholder !== false ? "/afterglow-logo-192.png" : "");
+    const titleText = t.eventTitleUppercase === false ? (ev.name || "Afterglow Register") : String(ev.name || "Afterglow Register").toUpperCase();
+    const eventTitle = t.showEventTitle !== false ? `<div class="print-event" style="left:${t.eventTitleX || 50}%;top:${t.eventTitleY || 5}%;font-size:${t.eventTitleSize || 9}pt;color:${t.eventTitleColor || "#E8B267"};font-weight:${t.eventTitleWeight || "bold"}">${escapeHtml(titleText)}</div>` : "";
+    const photo = t.showPhoto !== false && photoSrc ? `<img class="print-photo" src="${photoSrc}" style="left:${t.photoX || 50}%;top:${t.photoY || 18}%;width:${t.photoSize || 20}%;height:${t.photoSize || 20}%;border-radius:${badgeRadius(t.photoShape)};border:${t.photoBorderWidth ?? 2}px solid ${t.photoBorderColor || "#fff"};object-fit:${t.photoFit || "cover"}"/>` : "";
+    const qrBox = t.showQR !== false ? `<img class="print-qr" src="${qr}" style="left:${t.qrX || 50}%;top:${t.qrY || 32}%;width:${t.qrSize || 24}%;background:${t.qrBackground === false ? "transparent" : "#fff"};padding:${t.qrBackground === false ? 0 : (t.qrPadding ?? 5)}px;border-radius:${t.qrRadius ?? 6}px"/>` : "";
+    const fields = (t.fields || DEFAULT_BADGE.fields).map((f) => `<div class="print-field" style="left:${f.x}%;top:${f.y}%;font-size:${f.size || 12}pt;color:${f.color};font-weight:${f.weight};text-align:${f.align || "center"}">${escapeHtml(safe(delegateValue(d, f.key, ev)))}</div>`).join("");
+    htmlBadges.push(`<section class="print-page"><div class="print-badge" style="background:${t.bgColor || "#111"}">${t.backgroundUrl ? `<img class="print-bg" src="${t.backgroundUrl}" style="object-fit:${bgFit(t.backgroundFit)}"/>` : ""}${eventTitle}${photo}${qrBox}${fields}</div></section>`);
   }
   const win = window.open("", "_blank", "width=900,height=700");
-  win.document.write(`<!doctype html><html><head><title>Print Badges</title><style>@page{size:${paper.w}mm ${paper.h}mm;margin:${ev.printSettings?.marginMm || 0}mm}body{margin:0;background:#eee}.print-page{width:${paper.w}mm;height:${paper.h}mm;page-break-after:always;display:flex;align-items:center;justify-content:center}.print-badge{width:100%;height:100%;position:relative;overflow:hidden;font-family:Arial,sans-serif;color:#fff}.print-bg{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}.print-event{position:absolute;top:4mm;left:0;right:0;text-align:center;color:#E8B267;font-size:8pt;text-transform:uppercase;letter-spacing:1.8px;font-weight:bold}.print-qr{position:absolute;transform:translate(-50%,-50%);background:#fff;padding:2mm;border-radius:2mm}.print-photo{position:absolute;transform:translate(-50%,-50%);object-fit:cover;border-radius:50%;border:2px solid #fff}.print-field{position:absolute;transform:translateX(-50%);width:88%;text-shadow:0 1px 2px rgba(0,0,0,.55)}@media print{body{background:#fff}}</style></head><body>${htmlBadges.join("")}</body></html>`);
+  win.document.write(`<!doctype html><html><head><title>Print Badges</title><style>@page{size:${paper.w}mm ${paper.h}mm;margin:${ev.printSettings?.marginMm || 0}mm}body{margin:0;background:#eee}.print-page{width:${paper.w}mm;height:${paper.h}mm;page-break-after:always;display:flex;align-items:center;justify-content:center}.print-badge{width:100%;height:100%;position:relative;overflow:hidden;font-family:Arial,sans-serif;color:#fff}.print-bg{position:absolute;inset:0;width:100%;height:100%}.print-event{position:absolute;transform:translateX(-50%);text-align:center;text-transform:uppercase;letter-spacing:1.8px;z-index:1;width:90%}.print-qr{position:absolute;transform:translate(-50%,-50%);box-sizing:content-box}.print-photo{position:absolute;transform:translate(-50%,-50%);box-sizing:border-box}.print-field{position:absolute;transform:translateX(-50%);width:88%;text-shadow:0 1px 2px rgba(0,0,0,.55);z-index:2}@media print{body{background:#fff}}</style></head><body>${htmlBadges.join("")}</body></html>`);
   win.document.close();
   setTimeout(() => win.print(), 600);
 }
-function printTest(event) { printBadges([{ fullName: "Test Participant", organization: "Afterglow", jobTitle: "Guest", category: "VIP", delegateId: "TEST-001", qrToken: "TEST", event: event?._id }], event); }
+function printTest(event) { printBadges([{ fullName: "Test Participant", organization: "Afterglow", jobTitle: "Guest", category: "VIP", delegateId: "TEST-001", qrToken: "TEST", event: event?._id, photoUrl: "/afterglow-logo-192.png" }], event); }
 function paperSize(print = DEFAULT_PRINT) { const p = print.paperSize || "A6"; if (p === "A5") return { w: 148, h: 210 }; if (p === "A4") return { w: 210, h: 297 }; if (p === "CR80") return { w: 86, h: 54 }; if (p === "EVENT_BADGE") return { w: 86, h: 120 }; if (p === "CUSTOM") return { w: print.customWidthMm || 105, h: print.customHeightMm || 148 }; return { w: 105, h: 148 }; }
 function escapeHtml(s) { return String(s).replace(/[&<>"']/g, (m) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[m])); }
 
@@ -829,6 +1082,8 @@ function createImage(url) { return new Promise((resolve, reject) => { const img 
 
 const styles = `
 :root{--accent:#CF6B11;--bg:#0f0f0f;--panel:#151515;--panel2:#1b1b1b;--text:#f2f2f2;--muted:#8b8b8b;--line:#262626;--font-scale:1}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,Segoe UI,system-ui,sans-serif;font-size:calc(14px * var(--font-scale))}body.light{--bg:#f4f4f4;--panel:#fff;--panel2:#f8f8f8;--text:#151515;--muted:#6b7280;--line:#e5e7eb}button,input,select,textarea{font:inherit}button{cursor:pointer}input,select,textarea{width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:10px;color:var(--text);padding:10px 12px;outline:none}textarea{min-height:90px}.app-shell{height:100vh;display:flex;overflow:hidden}.sidebar{width:250px;background:var(--panel);border-right:1px solid var(--line);display:flex;flex-direction:column;flex-shrink:0}.brand{padding:18px;display:flex;gap:12px;align-items:center;border-bottom:1px solid var(--line)}.brand-logo{width:38px;height:38px;border-radius:12px;background:linear-gradient(135deg,var(--accent),#733709);display:flex;align-items:center;justify-content:center;font-weight:900;color:white;box-shadow:0 0 22px color-mix(in srgb,var(--accent),transparent 75%)}.brand-logo.big{width:60px;height:60px;margin:auto;font-size:22px}.brand-img{width:42px;height:42px;object-fit:contain;flex-shrink:0;filter:drop-shadow(0 0 14px color-mix(in srgb,var(--accent),transparent 55%))}.brand-img.big{width:86px;height:86px;margin:0 auto 10px;display:block}.brand-text{min-width:0}.brand-text b{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.brand-text span,.small-muted{color:var(--muted);font-size:12px}.event-select-wrap{padding:12px 14px;border-bottom:1px solid var(--line);min-width:0}.event-select-wrap label{display:block;color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px}.event-select-wrap select{height:38px;font-size:12px;max-width:100%;text-overflow:ellipsis}.active-event-name{margin-top:6px;font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}.nav-list{padding:10px 0;overflow:auto;flex:1}.nav-list button{width:100%;display:flex;gap:10px;align-items:center;border:0;background:transparent;color:var(--muted);padding:11px 18px;text-align:left;border-left:3px solid transparent}.nav-list button.active{color:var(--accent);background:color-mix(in srgb,var(--accent),transparent 88%);border-left-color:var(--accent)}.user-box{padding:14px 18px;border-top:1px solid var(--line);display:flex;flex-direction:column;gap:4px}.user-box span{color:var(--accent);font-size:11px}.link-btn{background:transparent;border:0;color:var(--muted);text-align:left;padding:6px 0}.main-panel{min-width:0;flex:1;overflow:auto}.topbar{position:sticky;top:0;z-index:5;background:color-mix(in srgb,var(--bg),transparent 6%);backdrop-filter:blur(10px);border-bottom:1px solid var(--line);padding:16px 24px;display:flex;align-items:center;gap:14px;justify-content:space-between}.top-title{min-width:0}.top-title h1{margin:0;font-size:20px}.top-title p{margin:2px 0 0;color:var(--muted);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:48vw}.top-actions{display:flex;gap:8px;align-items:center}.api-pill{background:var(--panel);border:1px solid var(--line);border-radius:999px;padding:7px 11px;font-size:11px;color:var(--muted);max-width:220px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.content{padding:24px;max-width:1480px;margin:auto}.btn{border:0;border-radius:10px;padding:10px 14px;font-weight:700;display:inline-flex;align-items:center;gap:7px;justify-content:center}.btn.primary{background:var(--accent);color:#fff}.btn.ghost{background:var(--panel2);border:1px solid var(--line);color:var(--text)}.btn.success{background:#15803d;color:#fff}.btn.danger{background:#7f1d1d;color:#fff}.btn.full{width:100%;margin-top:12px}.toolbar{display:flex;gap:10px;justify-content:flex-end;margin-bottom:16px;align-items:center}.toolbar.wrap{justify-content:flex-start;flex-wrap:wrap}.search{max-width:360px}.cards.three{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:18px}.stat-card,.panel,.event-card,.table-card{background:var(--panel);border:1px solid var(--line);border-radius:16px;box-shadow:0 8px 24px rgba(0,0,0,.12)}.stat-card{padding:20px;display:flex;justify-content:space-between;align-items:flex-start}.stat-card span{display:block;color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.8px}.stat-card b{display:block;font-size:34px;color:var(--accent);margin-top:8px}.stat-card b.green{color:#22c55e}.stat-card b.orange{color:#f59e0b}.stat-card i{font-size:28px;color:var(--accent);opacity:.85}.panel{padding:20px}.panel h2,.panel h3{margin-top:0}.grid-two{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-bottom:18px}.quick-actions{display:grid;grid-template-columns:1fr 1fr;gap:10px}.quick-actions button,.export-grid button{background:var(--panel2);border:1px solid var(--line);border-radius:12px;color:var(--text);padding:14px;text-align:left}.info-list,.info-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}.info-list span,.info-grid span{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:10px;color:var(--muted)}.info-list b,.info-grid b{display:block;color:var(--text);font-size:11px;margin-bottom:3px}.progress-row{margin:11px 0}.progress-row div{display:flex;justify-content:space-between;color:var(--muted);font-size:12px;margin-bottom:5px}.progress-row b{color:var(--accent)}.progress-row em{display:block;height:6px;background:var(--panel2);border-radius:99px;overflow:hidden}.progress-row i{display:block;height:100%;background:var(--accent)}.mini-delegate{display:flex;gap:10px;align-items:center;padding:10px;border-bottom:1px solid var(--line)}.mini-delegate:last-child{border-bottom:0}.mini-delegate b{display:block}.mini-delegate span{display:block;color:var(--muted);font-size:12px}.avatar{width:42px;height:42px;border-radius:12px;object-fit:cover}.avatar.initials{background:color-mix(in srgb,var(--accent),transparent 75%);color:var(--accent);font-weight:900;display:flex;align-items:center;justify-content:center}.cat-badge,.status{display:inline-block;padding:4px 8px;border-radius:99px;background:color-mix(in srgb,var(--accent),transparent 85%);color:var(--accent);font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.5px}.status.in{background:#14532d;color:#86efac}.status.pending{background:#3b2a0b;color:#facc15}.event-grid,.badge-grid,.user-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:16px}.event-card{overflow:hidden;padding:0 18px 18px}.event-color{height:5px;margin:0 -18px 14px}.event-card h3{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.event-card p{color:var(--muted);font-size:13px}.row-actions{display:flex;gap:7px;flex-wrap:wrap}.form-grid{display:grid;gap:12px}.form-grid.two{grid-template-columns:1fr 1fr}.field{display:flex;flex-direction:column;gap:6px;color:var(--muted);font-size:12px}.field.full{grid-column:1/-1}.form-section{background:var(--panel2);border:1px solid var(--line);border-radius:14px;padding:14px;margin-top:4px}.form-section h3,.form-section h4{margin:0 0 8px}.check-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:8px;margin:10px 0}.check-row{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:12px}.check-row input{width:auto}.custom-field-row{display:grid;grid-template-columns:1.5fr 110px 110px 38px;gap:8px;align-items:center;margin-bottom:8px}.modal-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:50;display:flex;align-items:center;justify-content:center;padding:18px}.modal{background:var(--panel);border:1px solid var(--line);border-radius:18px;max-width:760px;width:100%;max-height:92vh;overflow:auto;padding:20px}.modal-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px}.modal-head h2{margin:0}.modal-head button{background:var(--panel2);border:1px solid var(--line);color:var(--text);border-radius:10px;width:36px;height:36px}.modal-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:16px}.table-card{overflow:auto}table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:12px 14px;border-bottom:1px solid var(--line);vertical-align:middle}th{font-size:10px;text-transform:uppercase;letter-spacing:.8px;color:var(--muted)}td small{display:block;color:var(--muted);font-size:11px}.icon-btn{width:34px;height:34px;border-radius:9px;border:1px solid var(--line);background:var(--panel2);color:var(--accent)}.icon-btn.danger{color:#ef4444}.mobile-cards{display:none}.profile-head{display:flex;gap:16px;align-items:center;margin-bottom:18px}.profile-head h2{margin:0}.register-panel,.narrow{max-width:720px;margin:auto}.register-done{text-align:center}.register-done>i{font-size:64px;color:#22c55e}.qr-card{background:#fff;border-radius:14px;display:inline-flex;flex-direction:column;gap:8px;align-items:center;padding:16px;color:#111;margin:15px}.photo-preview{width:74px;height:74px;border-radius:14px;object-fit:cover;margin-top:8px}.public-page,.login-page{min-height:100vh;background:radial-gradient(circle at top,var(--accent)22,transparent 30%),var(--bg);display:flex;align-items:center;justify-content:center;padding:24px}.public-page{display:block}.public-brand{max-width:720px;margin:0 auto 18px;display:flex;gap:12px;align-items:center}.public-brand span{display:block;color:var(--muted);font-size:12px}.login-card{width:100%;max-width:430px;background:var(--panel);border:1px solid var(--line);border-radius:24px;padding:30px;box-shadow:0 30px 80px rgba(0,0,0,.3)}.login-card h1{text-align:center;margin:16px 0 5px}.login-card p{text-align:center;color:var(--muted)}.center{text-align:center}.alert{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:10px;margin:10px 0;color:var(--muted)}.alert.error{background:#3b1111;color:#fecaca;border-color:#7f1d1d}.toast{position:fixed;right:22px;bottom:22px;z-index:80;background:#14532d;color:#fff;padding:12px 16px;border-radius:12px;box-shadow:0 10px 35px rgba(0,0,0,.35);font-weight:700}.toast.error{background:#7f1d1d}.checkin-grid,.designer-grid,.settings-grid{display:grid;grid-template-columns:1.2fr .8fr;gap:18px}.qr-reader{background:#000;border-radius:14px;overflow:hidden}.manual-check{display:flex;gap:8px;margin-top:14px}.result-card{padding:18px;border-radius:14px;background:var(--panel2);display:flex;flex-direction:column;gap:8px}.result-card i{font-size:42px}.result-card.success i{color:#22c55e}.result-card.error i{color:#ef4444}.badge-tile{text-align:center}.badge-tile b{display:block;margin:8px 0;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.badge-view{position:relative;overflow:hidden;border-radius:13px;margin:auto;box-shadow:0 12px 35px rgba(0,0,0,.35);font-family:Arial,sans-serif}.badge-bg{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}.badge-event{position:absolute;top:8px;left:0;right:0;text-align:center;color:#E8B267;font-size:9px;text-transform:uppercase;letter-spacing:1.8px;font-weight:800;z-index:1}.badge-photo{position:absolute;transform:translate(-50%,-50%);object-fit:cover;border-radius:50%;border:2px solid white;z-index:2}.badge-qr{position:absolute;transform:translate(-50%,-50%);background:white;padding:5px;border-radius:6px;z-index:2}.badge-field{position:absolute;transform:translateX(-50%);width:88%;z-index:2;text-shadow:0 1px 3px rgba(0,0,0,.6)}.field-row{display:grid;grid-template-columns:2fr 70px 70px 80px 60px;gap:8px;margin-bottom:8px}.export-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:10px}.crop-area{height:360px;position:relative;background:#111;border-radius:14px;overflow:hidden;margin-bottom:16px}.empty{color:var(--muted);padding:25px;text-align:center}.mobile-menu{display:none}.mobile-bottom{display:none}
-@media(max-width:900px){.sidebar{display:none}.app-shell{display:block;height:auto;min-height:100vh;overflow:auto}.main-panel{padding-bottom:72px}.topbar{padding:14px;align-items:flex-start}.top-actions{display:none}.top-title p{max-width:80vw}.content{padding:14px}.cards.three,.grid-two,.checkin-grid,.designer-grid,.settings-grid{grid-template-columns:1fr}.quick-actions{grid-template-columns:1fr}.form-grid.two{grid-template-columns:1fr}.field.full{grid-column:auto}.mobile-bottom{position:fixed;bottom:0;left:0;right:0;z-index:20;display:grid;grid-template-columns:repeat(5,1fr);background:var(--panel);border-top:1px solid var(--line);padding:6px 4px}.mobile-bottom button{background:transparent;border:0;color:var(--muted);display:flex;flex-direction:column;align-items:center;gap:2px;font-size:10px}.mobile-bottom button i{font-size:20px}.mobile-bottom button.active{color:var(--accent)}table{display:none}.mobile-cards{display:block}.mobile-delegate{background:var(--panel);border-bottom:1px solid var(--line);padding:10px}.table-card{overflow:hidden}.event-grid,.badge-grid,.user-grid{grid-template-columns:1fr}.manual-check{flex-direction:column}.profile-head{align-items:flex-start;flex-wrap:wrap}.info-grid,.info-list{grid-template-columns:1fr}.modal{padding:16px}.modal-actions{flex-direction:column}.modal-actions .btn{width:100%}.crop-area{height:300px}.field-row{grid-template-columns:1fr 60px 60px;}.field-row input[type=color]{grid-column:auto}.api-pill{display:none}}
+.field-mode-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:10px;margin:12px 0}.field-mode-card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:10px;display:grid;grid-template-columns:1fr 120px;gap:10px;align-items:center}.field-mode-card b{display:block;color:var(--text)}.field-mode-card span{display:block;color:var(--muted);font-size:11px}.designer-section{border:1px solid var(--line);background:var(--panel2);border-radius:14px;padding:14px;margin:14px 0}.designer-section h3{margin:0 0 10px}.enhanced-field-row{grid-template-columns:1.4fr 1.2fr 65px 65px 65px 90px 90px 52px 38px}.badge-event{position:absolute;transform:translateX(-50%);right:auto;width:90%;letter-spacing:1.8px;text-align:center;text-transform:uppercase}.badge-bg{object-position:center}.badge-photo{box-sizing:border-box;background:#fff}.badge-qr{box-sizing:content-box}.preview-panel{position:sticky;top:92px;align-self:start}.pro-designer{grid-template-columns:minmax(0,1.2fr) minmax(320px,.8fr)}
+.event-banner-preview{margin-top:10px;background:var(--panel2);border:1px solid var(--line);border-radius:14px;padding:10px;display:flex;gap:12px;align-items:center;flex-wrap:wrap}.event-banner-preview img{width:100%;max-height:180px;object-fit:cover;border-radius:10px}.file-list{display:flex;flex-direction:column;gap:8px;margin-top:10px}.event-file-row{display:grid;grid-template-columns:1fr auto auto;gap:10px;align-items:center;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:10px}.event-file-row span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.event-file-row small{display:block;color:var(--muted)}.public-event-header{max-width:900px;margin:0 auto 18px}.public-event-banner{width:100%;max-height:280px;object-fit:cover;border-radius:18px;margin-bottom:14px;border:1px solid var(--line);background:#111}.public-event-info h1{margin:0 0 8px;font-size:26px}.public-event-meta{display:flex;gap:10px;flex-wrap:wrap;color:var(--muted);font-size:13px;margin-bottom:8px}.public-file-list{margin-top:16px;display:flex;flex-direction:column;gap:8px}.public-file-list h3{margin:0 0 4px}.public-file-list a{display:flex;align-items:center;gap:9px;padding:10px 12px;border-radius:10px;background:var(--panel2);border:1px solid var(--line);color:var(--text);text-decoration:none}.public-file-list a span{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.public-file-list a small{color:var(--muted)}
+@media(max-width:900px){.sidebar{display:none}.app-shell{display:block;height:auto;min-height:100vh;overflow:auto}.main-panel{padding-bottom:72px}.topbar{padding:14px;align-items:flex-start}.top-actions{display:none}.top-title p{max-width:80vw}.content{padding:14px}.cards.three,.grid-two,.checkin-grid,.designer-grid,.settings-grid{grid-template-columns:1fr}.quick-actions{grid-template-columns:1fr}.form-grid.two{grid-template-columns:1fr}.field.full{grid-column:auto}.mobile-bottom{position:fixed;bottom:0;left:0;right:0;z-index:20;display:grid;grid-template-columns:repeat(5,1fr);background:var(--panel);border-top:1px solid var(--line);padding:6px 4px}.mobile-bottom button{background:transparent;border:0;color:var(--muted);display:flex;flex-direction:column;align-items:center;gap:2px;font-size:10px}.mobile-bottom button i{font-size:20px}.mobile-bottom button.active{color:var(--accent)}table{display:none}.mobile-cards{display:block}.mobile-delegate{background:var(--panel);border-bottom:1px solid var(--line);padding:10px}.table-card{overflow:hidden}.event-grid,.badge-grid,.user-grid{grid-template-columns:1fr}.manual-check{flex-direction:column}.profile-head{align-items:flex-start;flex-wrap:wrap}.info-grid,.info-list{grid-template-columns:1fr}.modal{padding:16px}.modal-actions{flex-direction:column}.modal-actions .btn{width:100%}.crop-area{height:300px}.field-row,.enhanced-field-row{grid-template-columns:1fr 60px 60px;}.field-row input[type=color]{grid-column:auto}.api-pill{display:none}}
 @media(max-width:430px){.top-title h1{font-size:18px}.content{padding:10px}.panel,.stat-card{border-radius:13px;padding:14px}.stat-card b{font-size:28px}.login-card{padding:22px;border-radius:18px}.public-page,.login-page{padding:14px}.btn{padding:10px 12px}.badge-view{max-width:100%}.toolbar{flex-direction:column;align-items:stretch}.toolbar .btn,.toolbar select,.toolbar input{width:100%;max-width:100%}.cards.three{gap:10px}.mobile-bottom span{font-size:9px}}
 `;
